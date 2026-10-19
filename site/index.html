@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>rust-database</title>
+<meta name="description" content="An in-memory key–value store in Rust with versioned values and optimistic transactions.">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%23e8290b'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="frame" id="top">
+  <div class="grid bar">
+    <a class="wordmark" href="#top">rust-database</a>
+    <nav class="nav" aria-label="Sections">
+      <a href="#store">Store</a>
+      <a href="#transactions">Transactions</a>
+      <a href="#conflict">Conflict</a>
+      <a href="#api">API</a>
+      <a href="#status">Status</a>
+    </nav>
+    <button class="grid-toggle" id="grid-toggle" type="button" aria-pressed="false" hidden>Grid <kbd>G</kbd></button>
+  </div>
+
+  <h1 class="display grid" aria-label="Stage. Validate. Commit.">
+    <span>Stage.</span>
+    <span>Validate.</span>
+    <span>Commit<span class="signal">.</span></span>
+  </h1>
+
+  <div class="grid hero-foot">
+    <p class="label col-label"><span>Key–value store</span><span class="path">Rust, in memory</span></p>
+    <p class="lead col-text">Every value in rust-database carries a version number. A transaction keeps its writes to itself, notes the version of each key it reads, and commits only if none of those versions moved.</p>
+    <dl class="spec col-aside">
+      <dt>Language</dt><dd>Rust 1.95.0</dd>
+      <dt>Edition</dt><dd>2024</dd>
+      <dt>Crates</dt><dd>0 dependencies</dd>
+      <dt>Source</dt><dd>2 files, 205 lines</dd>
+      <dt>Tests</dt><dd>4 ok, 1 ignored</dd>
+    </dl>
+  </div>
+</header>
+
+<main>
+
+  <section class="frame" id="store" aria-labelledby="store-title">
+    <div class="grid head">
+      <p class="label col-label"><span>Store</span><span class="path">src/lib.rs</span></p>
+      <h2 class="title col-main" id="store-title">One map. Every value has a version.</h2>
+    </div>
+    <div class="grid body">
+      <div class="prose col-text">
+        <p>The whole database is a <code>HashMap&lt;String, (u64, String)&gt;</code> behind an <code>Arc&lt;Mutex&lt;…&gt;&gt;</code>. Cloning a <code>Database</code> copies the handle, not the data, so every clone and every transaction works on the same map.</p>
+        <p class="muted">The version is what makes transactions possible. It tells a reader whether a key changed since it last looked, without comparing values.</p>
+        <ul class="rules">
+          <li><code>insert</code><span>A new key is stored at version 1.</span></li>
+          <li><code>insert</code><span>An existing key gets the new value and its version goes up by 1.</span></li>
+          <li><code>delete</code><span>The entry is removed, version included.</span></li>
+        </ul>
+      </div>
+      <figure class="col-aside">
+        <div class="table-wrap">
+          <table class="ledger">
+            <thead>
+              <tr><th scope="col">Call</th><th scope="col">Ver.</th><th scope="col">Value</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>insert("k", "a")</td><td><span class="ver">1</span></td><td>"a"</td></tr>
+              <tr><td>insert("k", "b")</td><td><span class="ver">2</span></td><td>"b"</td></tr>
+              <tr><td>delete("k")</td><td>none</td><td>none</td></tr>
+              <tr><td>insert("k", "c")</td><td><span class="ver reset">1</span></td><td>"c"</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <figcaption class="fig-note">After a delete, the count starts over at 1.</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section class="frame" id="transactions" aria-labelledby="transactions-title">
+    <div class="grid head">
+      <p class="label col-label"><span>Transactions</span><span class="path">src/transaction.rs</span></p>
+      <h2 class="title col-main" id="transactions-title">Writes wait in a buffer until commit.</h2>
+    </div>
+    <div class="grid body steps">
+      <article class="step col-third">
+        <span class="step-no" aria-hidden="true">1</span>
+        <h3>Stage</h3>
+        <p><code>set</code> and <code>delete</code> write to the transaction’s own <code>pending</code> map, where a delete is stored as <code>None</code>. <code>get</code> answers from <code>pending</code> first. On a miss it reads the store and records the version it saw in <code>reads</code>.</p>
+<pre><code>let mut tnx = db.begin();
+tnx.set("k".to_string(), "v".to_string());
+let n = tnx.get("counter");</code></pre>
+      </article>
+      <article class="step col-third">
+        <span class="step-no" aria-hidden="true">2</span>
+        <h3>Validate</h3>
+        <p><code>commit</code> compares every key in <code>reads</code> with the store. If a version changed, or a key appeared or disappeared, it returns <code>Err(CommitErr::Conflict)</code> and writes nothing.</p>
+<pre><code>if *seen_version != current_version {
+    return Err(CommitErr::Conflict);
+}</code></pre>
+      </article>
+      <article class="step col-third">
+        <span class="step-no" aria-hidden="true">3</span>
+        <h3>Commit</h3>
+        <p>When every read is still current, the pending writes go to the store. <code>Some(v)</code> becomes an insert and <code>None</code> becomes a delete. <code>commit</code> takes <code>self</code>, so a transaction can only be used once.</p>
+<pre><code>match value {
+    Some(v) =&gt; self.db.insert(key, v),
+    None =&gt; self.db.delete(&amp;key),
+}</code></pre>
+      </article>
+      <div class="note col-main">
+        <h3>Rollback is a drop.</h3>
+        <p class="muted">A transaction that goes out of scope without <code>commit</code> takes its pending writes with it. The store never saw them. The test <code>drop_without_commit_is_rolled_back</code> checks this.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="frame" id="conflict" aria-labelledby="conflict-title">
+    <div class="grid head">
+      <p class="label col-label"><span>Conflict</span><span class="path">Worked example</span></p>
+      <h2 class="title col-main" id="conflict-title">Two readers, one counter. The second commit fails.</h2>
+    </div>
+    <div class="grid body">
+      <div class="table-wrap">
+        <table class="timeline">
+          <thead>
+            <tr><th scope="col">Step</th><th scope="col">Transaction 1</th><th scope="col">Store: counter</th><th scope="col">Transaction 2</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>t1</td><td data-who="Transaction 1"><code>begin</code>, then <code>get("counter")</code> reads "0" at v1</td><td>"0" <span class="ver">1</span></td><td></td></tr>
+            <tr><td>t2</td><td></td><td>"0" <span class="ver">1</span></td><td data-who="Transaction 2"><code>begin</code>, then <code>get("counter")</code> reads "0" at v1</td></tr>
+            <tr><td>t3</td><td data-who="Transaction 1"><code>set("counter", "1")</code> is staged</td><td>"0" <span class="ver">1</span></td><td></td></tr>
+            <tr><td>t4</td><td data-who="Transaction 1"><code>commit</code> finds v1 unchanged and writes <span class="ok">Ok(())</span></td><td>"1" <span class="ver">2</span></td><td></td></tr>
+            <tr><td>t5</td><td></td><td>"1" <span class="ver">2</span></td><td data-who="Transaction 2"><code>set("counter", "1")</code> is staged</td></tr>
+            <tr class="lost"><td>t6</td><td></td><td>"1" <span class="ver">2</span></td><td data-who="Transaction 2"><code>commit</code> saw v1, store has v2: <span class="err">Err(Conflict)</span></td></tr>
+          </tbody>
+        </table>
+        <p class="fig-note">Without the check, both transactions would write "1" and one increment would be lost.</p>
+      </div>
+      <p class="muted col-text">Keys a transaction only writes are not checked. In <code>two_live_transactions</code> both sides call <code>set</code> without reading, both commits succeed, and the later one wins.</p>
+    </div>
+  </section>
+
+  <section class="frame" id="api" aria-labelledby="api-title">
+    <div class="grid head">
+      <p class="label col-label"><span>API</span><span class="path">Methods as written</span></p>
+      <h2 class="title col-main" id="api-title">Ten methods, one error.</h2>
+    </div>
+    <div class="grid body api">
+      <div class="col-half">
+        <h3>Database <span class="mono">6 methods</span></h3>
+        <ul>
+          <li><code>new() -&gt; Database</code><p>Create an empty store.</p></li>
+          <li><code>insert(&amp;self, key: String, value: String)</code><p>Write directly to the store and bump the version.</p></li>
+          <li><code>get(&amp;self, key: &amp;str) -&gt; Option&lt;String&gt;</code><p>Read the current value.</p></li>
+          <li><code>get_versioned(&amp;self, key: &amp;str) -&gt; Option&lt;(u64, String)&gt;</code><p>Read the current value with its version.</p></li>
+          <li><code>delete(&amp;self, key: &amp;str)</code><p>Remove the key.</p></li>
+          <li><code>begin(&amp;self) -&gt; Transaction</code><p>Start a transaction on this store.</p></li>
+        </ul>
+      </div>
+      <div class="col-half">
+        <h3>Transaction <span class="mono">4 methods</span></h3>
+        <ul>
+          <li><code>set(&amp;mut self, key: String, value: String)</code><p>Stage a write.</p></li>
+          <li><code>get(&amp;mut self, key: &amp;str) -&gt; Option&lt;String&gt;</code><p>Read staged writes first, then the store. Records the version it saw.</p></li>
+          <li><code>delete(&amp;mut self, key: String)</code><p>Stage a delete.</p></li>
+          <li><code>commit(self) -&gt; Result&lt;(), CommitErr&gt;</code><p>Check every read, then apply. The only error is <code>CommitErr::Conflict</code>.</p></li>
+        </ul>
+      </div>
+      <p class="muted col-text">The <code>Database</code> type is private to the crate for now, so these methods can be called from inside the crate only.</p>
+    </div>
+  </section>
+
+  <section class="frame" id="status" aria-labelledby="status-title">
+    <div class="grid head">
+      <p class="label col-label"><span>Status</span><span class="path">v0.1.0</span></p>
+      <h2 class="title col-main" id="status-title">Four tests pass. One waits on a fix.</h2>
+    </div>
+    <div class="grid body">
+      <div class="sub col-half">
+        <h3>cargo test</h3>
+        <ul class="tests">
+          <li><code>test_insert_and_get</code><span class="chip pass">ok</span></li>
+          <li><code>commit_is_visible</code><span class="chip pass">ok</span></li>
+          <li><code>drop_without_commit_is_rolled_back</code><span class="chip pass">ok</span></li>
+          <li><code>two_live_transactions</code><span class="chip pass">ok</span></li>
+          <li><code>threaded_increment_race</code><span class="chip skip">ignored</span><span class="why">100 threads each add 1 to a counter 1,000 times and expect 100,000. Ignored until commit validates and writes under one lock and the loop retries on conflict.</span></li>
+        </ul>
+      </div>
+      <div class="sub col-half">
+        <h3>Open issues</h3>
+        <ul class="limits">
+          <li><span class="tag">Concurrency</span><h3>Commit is not atomic yet.</h3><p>Validation and each write take the lock separately, so another commit can land between the check and the writes.</p></li>
+          <li><span class="tag">Errors</span><h3>No automatic retry.</h3><p>A conflict returns an error and the caller has to start a new transaction.</p></li>
+          <li><span class="tag">Isolation</span><h3>Blind writes are not checked.</h3><p>A key that a transaction writes without reading cannot cause a conflict, so the last commit wins.</p></li>
+          <li><span class="tag">Versions</span><h3>Delete resets the count.</h3><p>A key that is deleted and written again is back at v1, so a transaction that read the old v1 will not notice the change.</p></li>
+          <li><span class="tag">Durability</span><h3>Memory only.</h3><p>Nothing is written to disk. The data is gone when the process exits.</p></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="frame foot" aria-labelledby="run-title">
+  <div class="grid head">
+    <p class="label col-label"><span>Run it</span><span class="path">No crates to fetch</span></p>
+    <h2 class="title col-main" id="run-title">Clone and test.</h2>
+  </div>
+  <div class="grid body">
+    <div class="run col-main">
+<pre id="run-cmd"><code><span class="prompt">$ </span>git clone https://github.com/roman-woronov/rust-database.git
+<span class="prompt">$ </span>cd rust-database &amp;&amp; cargo test</code></pre>
+      <button class="copy" id="copy-run" type="button" data-copy="git clone https://github.com/roman-woronov/rust-database.git&#10;cd rust-database &amp;&amp; cargo test" hidden>Copy commands</button>
+    </div>
+  </div>
+  <div class="grid colophon">
+    <p>rust-database 0.1.0</p>
+    <p>Set in Schibsted Grotesk and Fragment Mono, both under the SIL Open Font License.</p>
+    <p><a href="https://github.com/roman-woronov/rust-database">Source on GitHub</a></p>
+  </div>
+</footer>
+
+<div class="grid-overlay" id="grid-overlay" aria-hidden="true" hidden>
+  <div class="frame grid">
+    <span style="--i:0"></span><span style="--i:1"></span><span style="--i:2"></span><span style="--i:3"></span>
+    <span style="--i:4"></span><span style="--i:5"></span><span style="--i:6"></span><span style="--i:7"></span>
+    <span style="--i:8"></span><span style="--i:9"></span><span style="--i:10"></span><span style="--i:11"></span>
+  </div>
+</div>
+
+<script src="main.js" defer></script>
+</body>
+</html>
