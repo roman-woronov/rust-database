@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>rust-database</title>
+<meta name="description" content="An in-memory key–value store in Rust with versioned values and optimistic transactions.">
+<meta name="color-scheme" content="light">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='1' y='1' width='14' height='14' fill='%23ff5a1f' stroke='%230b0b0b' stroke-width='2'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="ticker" role="note" aria-label="Project facts">
+  <div class="ticker-track">
+    <span>rust-database &nbsp;•&nbsp; <b>4 tests ok</b> &nbsp;•&nbsp; <i>1 ignored</i> &nbsp;•&nbsp; 0 dependencies &nbsp;•&nbsp; Rust 1.95.0 &nbsp;•&nbsp; edition 2024 &nbsp;•&nbsp; in memory &nbsp;•&nbsp; optimistic transactions &nbsp;•&nbsp;&nbsp;</span>
+    <span aria-hidden="true">rust-database &nbsp;•&nbsp; <b>4 tests ok</b> &nbsp;•&nbsp; <i>1 ignored</i> &nbsp;•&nbsp; 0 dependencies &nbsp;•&nbsp; Rust 1.95.0 &nbsp;•&nbsp; edition 2024 &nbsp;•&nbsp; in memory &nbsp;•&nbsp; optimistic transactions &nbsp;•&nbsp;&nbsp;</span>
+  </div>
+</div>
+
+<header class="wrap" id="top">
+  <div class="topbar">
+    <a class="logo" href="#top">rust-database</a>
+    <nav class="nav" aria-label="Sections">
+      <a href="#store">Store</a>
+      <a href="#moves">Transactions</a>
+      <a href="#race">Race</a>
+      <a href="#api">API</a>
+      <a href="#status">Status</a>
+    </nav>
+  </div>
+
+  <section class="box hero" aria-labelledby="hero-title">
+    <h1 id="hero-title"><span>Commit or</span><span>conflict.</span></h1>
+    <div class="hero-grid">
+      <div class="hero-copy">
+        <p class="lead">rust-database is a key–value store that lives in memory. Every value carries a version. A transaction keeps its writes to itself and commits only if nothing it read has changed.</p>
+        <div class="actions">
+          <a class="btn" href="#race">Run the race</a>
+          <a class="btn" href="#api">Read the API</a>
+        </div>
+        <div class="stickers" aria-label="Facts">
+          <span class="tag">v0.1.0</span>
+          <span class="tag">0 dependencies</span>
+          <span class="tag">Rust 1.95.0</span>
+          <span class="tag">Edition 2024</span>
+        </div>
+      </div>
+      <figure class="box term">
+        <figcaption class="term-bar"><span class="tag">Terminal</span><span class="term-meta">cargo test, Oct 19 2026</span></figcaption>
+<pre><span class="dim">$</span> cargo test
+running 5 tests
+test tests::commit_is_visible ... <span class="ok">ok</span>
+test tests::threaded_increment_race ... <span class="skip">ignored, commit must validate+write under one lock, and the loop must retry on Conflict</span>
+test tests::drop_without_commit_is_rolled_back ... <span class="ok">ok</span>
+test tests::test_insert_and_get ... <span class="ok">ok</span>
+test tests::two_live_transactions ... <span class="ok">ok</span>
+
+test result: <span class="ok">ok</span>. 4 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out</pre>
+      </figure>
+    </div>
+  </section>
+</header>
+
+<main class="wrap">
+
+  <section id="store" aria-labelledby="store-title">
+    <div class="sec-head">
+      <span class="tag fill-staged">src/lib.rs</span>
+      <h2 id="store-title">One map, versioned.</h2>
+      <p>The whole database is a <code>HashMap&lt;String, (u64, String)&gt;</code> behind an <code>Arc&lt;Mutex&lt;…&gt;&gt;</code>. Cloning a <code>Database</code> copies the handle, not the data, so every clone and every transaction works on the same map.</p>
+    </div>
+    <div class="store-grid">
+      <div class="grid three">
+        <article class="box pad rule fill-ok">
+          <span class="tag">insert, new key</span>
+          <span class="big">v1</span>
+          <p>A new key is stored at version 1.</p>
+        </article>
+        <article class="box pad rule fill-staged">
+          <span class="tag">insert, existing key</span>
+          <span class="big">v+1</span>
+          <p>The value is replaced and the version goes up by 1.</p>
+        </article>
+        <article class="box pad rule fill-conflict">
+          <span class="tag">delete</span>
+          <span class="big">gone</span>
+          <p>The entry is removed, version included.</p>
+        </article>
+      </div>
+      <figure class="box pad stack">
+        <h3>Version ledger</h3>
+        <div class="table-wrap">
+          <table class="ledger">
+            <thead>
+              <tr><th scope="col">Call</th><th scope="col">Ver.</th><th scope="col">Value</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>insert("k", "a")</td><td><span class="ver">1</span></td><td>"a"</td></tr>
+              <tr><td>insert("k", "b")</td><td><span class="ver">2</span></td><td>"b"</td></tr>
+              <tr><td>delete("k")</td><td>none</td><td>none</td></tr>
+              <tr><td>insert("k", "c")</td><td><span class="ver reset">1</span></td><td>"c"</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <figcaption class="fig-note">After a delete, the count starts over at 1.</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section id="moves" aria-labelledby="moves-title">
+    <div class="sec-head">
+      <span class="tag fill-staged">src/transaction.rs</span>
+      <h2 id="moves-title">Three moves to commit.</h2>
+      <p>A transaction does not touch the store until it commits. It keeps two private maps: <code>pending</code> for its own writes and <code>reads</code> for the versions it saw.</p>
+    </div>
+    <div class="grid three">
+      <article class="box pad step fill-staged">
+        <span class="step-no" aria-hidden="true">1</span>
+        <h3>Stage</h3>
+        <p><code>set</code> and <code>delete</code> write to <code>pending</code>, where a delete is stored as <code>None</code>. <code>get</code> answers from <code>pending</code> first. On a miss it reads the store and records the version it saw.</p>
+<pre><code>let mut tnx = db.begin();
+tnx.set("k".to_string(), "v".to_string());
+let n = tnx.get("counter");</code></pre>
+      </article>
+      <article class="box pad step">
+        <span class="step-no" aria-hidden="true">2</span>
+        <h3>Validate</h3>
+        <p><code>commit</code> compares every key in <code>reads</code> with the store. If a version changed, or a key appeared or disappeared, it returns <code>Err(CommitErr::Conflict)</code> and writes nothing.</p>
+<pre><code>if *seen_version != current_version {
+    return Err(CommitErr::Conflict);
+}</code></pre>
+      </article>
+      <article class="box pad step fill-ok">
+        <span class="step-no" aria-hidden="true">3</span>
+        <h3>Commit</h3>
+        <p>When every read is still current, the pending writes go to the store. <code>Some(v)</code> becomes an insert and <code>None</code> becomes a delete. <code>commit</code> takes <code>self</code>, so a transaction is used once.</p>
+<pre><code>match value {
+    Some(v) =&gt; self.db.insert(key, v),
+    None =&gt; self.db.delete(&amp;key),
+}</code></pre>
+      </article>
+    </div>
+    <div class="box pad drop">
+      <strong>Drop = rollback</strong>
+      <p>A transaction that goes out of scope without <code>commit</code> takes its pending writes with it. The store never saw them. <code>drop_without_commit_is_rolled_back</code> checks this.</p>
+    </div>
+  </section>
+
+  <section id="race" aria-labelledby="race-title">
+    <div class="sec-head">
+      <span class="tag fill-conflict">Step through it</span>
+      <h2 id="race-title">Run the race.</h2>
+      <p>Two transactions read the same counter and both try to add 1. Before they start, <code>db.insert("counter", "0")</code> stores it at version 1.</p>
+    </div>
+
+    <div class="race">
+      <article class="box actor" aria-labelledby="t1-title">
+        <div class="actor-head fill-t1"><h3 id="t1-title">Transaction 1</h3><span class="tag">T1</span></div>
+        <dl>
+          <dt>Status</dt><dd data-field="t1-status">open</dd>
+          <dt>Reads</dt><dd data-field="t1-reads" class="hot">counter: v1</dd>
+          <dt>Pending</dt><dd data-field="t1-pending">none</dd>
+        </dl>
+      </article>
+      <article class="box actor store-card" aria-labelledby="store-card-title">
+        <div class="actor-head fill-ink"><h3 id="store-card-title">Store</h3><span class="tag">Shared</span></div>
+        <div class="value" aria-live="polite"><strong data-field="store-value">"0"</strong><span class="ver" data-field="store-ver">v1</span></div>
+        <p class="key">key: counter</p>
+      </article>
+      <article class="box actor" aria-labelledby="t2-title">
+        <div class="actor-head fill-t2"><h3 id="t2-title">Transaction 2</h3><span class="tag">T2</span></div>
+        <dl>
+          <dt>Status</dt><dd data-field="t2-status">not started</dd>
+          <dt>Reads</dt><dd data-field="t2-reads">none</dd>
+          <dt>Pending</dt><dd data-field="t2-pending">none</dd>
+        </dl>
+      </article>
+    </div>
+
+    <div class="controls" id="race-controls" hidden>
+      <button class="btn" id="race-back" type="button">Back</button>
+      <button class="btn fill-rust" id="race-next" type="button">Next step</button>
+      <button class="btn" id="race-reset" type="button">Restart</button>
+      <span class="counter" id="race-counter" aria-live="polite">Step 1 of 6</span>
+    </div>
+
+    <ol class="box log" id="race-log" aria-label="All steps">
+      <li><button type="button" aria-current="step"><span class="when">t1</span><span class="tag who fill-t1">T1</span><span class="what"><code>begin</code>, then <code>get("counter")</code> reads "0" at v1</span></button></li>
+      <li><button type="button"><span class="when">t2</span><span class="tag who fill-t2">T2</span><span class="what"><code>begin</code>, then <code>get("counter")</code> reads "0" at v1</span></button></li>
+      <li><button type="button"><span class="when">t3</span><span class="tag who fill-t1">T1</span><span class="what"><code>set("counter", "1")</code> is staged</span></button></li>
+      <li><button type="button"><span class="when">t4</span><span class="tag who fill-t1">T1</span><span class="what"><code>commit</code> finds v1 unchanged, writes, and returns <code>Ok(())</code></span></button></li>
+      <li><button type="button"><span class="when">t5</span><span class="tag who fill-t2">T2</span><span class="what"><code>set("counter", "1")</code> is staged</span></button></li>
+      <li class="lost"><button type="button"><span class="when">t6</span><span class="tag who fill-t2">T2</span><span class="what"><code>commit</code> saw v1, the store has v2: <code>Err(Conflict)</code></span></button></li>
+    </ol>
+
+    <p class="race-note">Without the version check, both commits would write "1" and one increment would be lost. Keys a transaction only writes are not checked. In <code>two_live_transactions</code> both sides call <code>set</code> without reading, both commits succeed, and the later one wins.</p>
+  </section>
+
+  <section id="api" aria-labelledby="api-title">
+    <div class="sec-head">
+      <span class="tag fill-t1">Methods as written</span>
+      <h2 id="api-title">Ten methods. One error.</h2>
+    </div>
+    <div class="grid two api">
+      <div class="box">
+        <div class="api-head fill-ink"><h3>Database</h3><span class="tag">6 methods</span></div>
+        <ul>
+          <li><code>new() -&gt; Database</code><p>Create an empty store.</p></li>
+          <li><code>insert(&amp;self, key: String, value: String)</code><p>Write directly to the store and bump the version.</p></li>
+          <li><code>get(&amp;self, key: &amp;str) -&gt; Option&lt;String&gt;</code><p>Read the current value.</p></li>
+          <li><code>get_versioned(&amp;self, key: &amp;str) -&gt; Option&lt;(u64, String)&gt;</code><p>Read the current value with its version.</p></li>
+          <li><code>delete(&amp;self, key: &amp;str)</code><p>Remove the key.</p></li>
+          <li><code>begin(&amp;self) -&gt; Transaction</code><p>Start a transaction on this store.</p></li>
+        </ul>
+      </div>
+      <div class="box">
+        <div class="api-head fill-ink"><h3>Transaction</h3><span class="tag">4 methods</span></div>
+        <ul>
+          <li><code>set(&amp;mut self, key: String, value: String)</code><p>Stage a write.</p></li>
+          <li><code>get(&amp;mut self, key: &amp;str) -&gt; Option&lt;String&gt;</code><p>Read staged writes first, then the store. Records the version it saw.</p></li>
+          <li><code>delete(&amp;mut self, key: String)</code><p>Stage a delete.</p></li>
+          <li><code>commit(self) -&gt; Result&lt;(), CommitErr&gt;</code><p>Check every read, then apply. The only error is <code>CommitErr::Conflict</code>.</p></li>
+        </ul>
+      </div>
+    </div>
+    <p class="api-note">The <code>Database</code> type is private to the crate for now, so these methods can be called from inside the crate only.</p>
+  </section>
+
+  <section id="status" aria-labelledby="status-title">
+    <div class="sec-head">
+      <span class="tag fill-ok">cargo test</span>
+      <h2 id="status-title">4 ok. 1 ignored.</h2>
+    </div>
+    <ul class="box tests">
+      <li><code>test_insert_and_get</code><span class="tag fill-ok">ok</span></li>
+      <li><code>commit_is_visible</code><span class="tag fill-ok">ok</span></li>
+      <li><code>drop_without_commit_is_rolled_back</code><span class="tag fill-ok">ok</span></li>
+      <li><code>two_live_transactions</code><span class="tag fill-ok">ok</span></li>
+      <li class="skip-row"><code>threaded_increment_race</code><span class="tag">ignored</span><span class="why">100 threads each add 1 to a counter 1,000 times and expect 100,000. It is ignored until commit validates and writes under one lock and the loop retries on conflict.</span></li>
+    </ul>
+
+    <h3 class="sub-title" id="gaps-title">Open issues</h3>
+    <ul class="gaps" aria-labelledby="gaps-title">
+      <li class="box pad gap-card fill-conflict"><span class="tag">Concurrency · blocks a test</span><h3>Commit is not atomic yet.</h3><p>Validation and each write take the lock separately, so another commit can land between the check and the writes.</p></li>
+      <li class="box pad gap-card"><span class="tag">Errors</span><h3>No automatic retry.</h3><p>A conflict returns an error and the caller has to start a new transaction.</p></li>
+      <li class="box pad gap-card"><span class="tag">Isolation</span><h3>Blind writes are not checked.</h3><p>A key that a transaction writes without reading cannot cause a conflict, so the last commit wins.</p></li>
+      <li class="box pad gap-card"><span class="tag">Versions</span><h3>Delete resets the count.</h3><p>A key that is deleted and written again is back at v1, so a transaction that read the old v1 will not notice the change.</p></li>
+      <li class="box pad gap-card"><span class="tag">Durability</span><h3>Memory only.</h3><p>Nothing is written to disk. The data is gone when the process exits.</p></li>
+      <li class="box pad gap-card"><span class="tag">API</span><h3>Private to the crate.</h3><p><code>Database</code> is not <code>pub</code>, so other crates cannot use it yet.</p></li>
+    </ul>
+  </section>
+
+</main>
+
+<footer class="wrap foot" aria-labelledby="run-title">
+  <div class="sec-head">
+    <span class="tag fill-ok">No crates to fetch</span>
+    <h2 id="run-title">Clone it. Test it.</h2>
+  </div>
+  <div class="run">
+<pre id="run-cmd"><code><span class="prompt">$ </span>git clone https://github.com/roman-woronov/rust-database.git
+<span class="prompt">$ </span>cd rust-database &amp;&amp; cargo test</code></pre>
+    <button class="btn fill-ok" id="copy-run" type="button" data-copy="git clone https://github.com/roman-woronov/rust-database.git&#10;cd rust-database &amp;&amp; cargo test" hidden>Copy commands</button>
+  </div>
+  <div class="colophon">
+    <span>rust-database 0.1.0</span>
+    <span>Set in Archivo and Martian Mono · SIL Open Font License</span>
+    <a href="https://github.com/roman-woronov/rust-database">Source on GitHub</a>
+  </div>
+</footer>
+
+<script src="main.js" defer></script>
+</body>
+</html>
